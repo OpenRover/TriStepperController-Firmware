@@ -1,0 +1,24 @@
+# OS generated files
+.DS_Store
+Thumbs.db
+# Compiler products
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.obj
+*.bin
+*.out
+*.log
+*.dSYM
+# PlatformIO Project
+.pio
+# IDE and Language Server
+.vscode
+.cache
+# Compile Database used by clangd
+compile_commands.json
+# Python
+__pycache__
