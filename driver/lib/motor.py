@@ -165,7 +165,7 @@ class Motor:
             Prop.MOT_MOV,
             MoveCommand(
                 id=self.id,
-                target=self.absolutePosition(position * self.steps_per_unit),
+                target=self.absolutePosition(position),
                 step_time=0,  # Directly set position, no movement
             ).encode(),
             expect=(Method.ACK, Prop.MOT_MOV, self.match_packet),
