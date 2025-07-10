@@ -64,10 +64,10 @@ try:
                     tick()
             for slot in range(4):
                 Expect.wait(m1.move(slot + 4.5, speed=1.0))
-                Expect.wait(m2.move(1.0, speed=3.0))
+                Expect.wait(m2.move(1.0, speed=2.0))
                 for _ in loop_for(0.2):
                     tick()
-                Expect.wait(m2.move(0.0, speed=3.0))
+                Expect.wait(m2.move(0.0, speed=2.0))
                 for _ in loop_for(0.2):
                     tick()
             m1.setPosition(m1.position % 6.0)
