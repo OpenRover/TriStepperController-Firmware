@@ -143,7 +143,7 @@ class Motor:
         else:
             return self.cached_position
 
-    def getPosition(self) -> int:
+    def getPosition(self):
         buffer = self.driver(
             Method.GET,
             Prop.MOT_MOV,

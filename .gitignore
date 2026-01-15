@@ -22,3 +22,4 @@ Thumbs.db
 compile_commands.json
 # Python
 __pycache__
+driver/.env
