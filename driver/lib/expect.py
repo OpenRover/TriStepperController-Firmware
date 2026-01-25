@@ -53,7 +53,9 @@ class Expect:
 
     @staticmethod
     def wait(
-        *expects: "Expect", timeout: float | None = None, tick: Callable | None = None
+        *expects: "Expect | Fulfilled",
+        timeout: float | None = None,
+        tick: Callable | None = None
     ):
         """Wait until all expected packets are received."""
         if timeout is not None:
@@ -63,7 +65,7 @@ class Expect:
         while True:
             if ddl is not None and now() > ddl:
                 return False
-            expects = [e for e in expects if not e()]
+            expects = tuple(e for e in expects if not e())
             if len(expects) == 0:
                 return True
             if tick is not None:
