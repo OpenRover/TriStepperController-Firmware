@@ -30,8 +30,7 @@ PROP_MASK = 0x0F
 
 
 class Prop(Enum):
-    NONE = None
-    FW_INFO = 0x0
+    NA = 0x0
     SYS_ENA = 0x1
     MOT_ENA = 0x2
     MOT_CFG = 0x3
@@ -41,6 +40,7 @@ class Prop(Enum):
     LED_PROG = 0xA
     ODOM_SENSOR = 0xB
     COLOR_SENSOR = 0xC
+    FW_INFO = 0xF
 
 
 @staticmethod

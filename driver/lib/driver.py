@@ -60,10 +60,20 @@ class Driver(Serial):
         if not self.is_open:
             raise IOError("Serial port is not open.")
         try:
-            self(Method.SET, Prop.SYS_ENA, uint8(1))
+            self(
+                Method.SET,
+                Prop.SYS_ENA,
+                uint8(1),
+                expect=(Method.ACK, Prop.SYS_ENA, lambda p: p == uint8(1)),
+            )
             yield self
         finally:
-            self(Method.SET, Prop.SYS_ENA, uint8(0))
+            self(
+                Method.SET,
+                Prop.SYS_ENA,
+                uint8(0),
+                expect=(Method.ACK, Prop.SYS_ENA, lambda p: p == uint8(0)),
+            )
 
     tx_lock = Lock()
 
@@ -129,7 +139,7 @@ class Driver(Serial):
             print(f"Decoding error: {e} for frame {bytes_repr(frame)}", file=stderr)
             return None
 
-    rx = PacketChain(Method.NOP, Prop.NONE, b"")
+    rx = PacketChain(Method.NOP, Prop.NA, b"")
     _sig_term = False
 
     def reader(self):
