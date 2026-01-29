@@ -28,7 +28,6 @@ typedef enum Method : uint8_t {
 
 typedef enum Property : uint8_t {
   NA = 0x0,
-  FW_INFO = 0x0,
   SYS_ENA = 0x1,
   MOT_ENA = 0x2,
   MOT_CFG = 0x3,
@@ -38,6 +37,7 @@ typedef enum Property : uint8_t {
   LED_PROG = 0xA,
   ODOM_SENSOR = 0xB,
   COLOR_SENSOR = 0xC,
+  FW_INFO = 0xF,
 } Property;
 
 struct __attribute__((packed)) Header {
@@ -79,6 +79,10 @@ public:
   }
   inline bool validate() const {
     return header.checksum == header.compute_checksum(payload, payload_size);
+  }
+  template <typename T>
+  constexpr inline const bool check(size_t size = sizeof(T)) const {
+    return size == payload_size;
   }
   template <typename T> constexpr inline const T &as() const {
     return *reinterpret_cast<const T *>(&payload);

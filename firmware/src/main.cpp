@@ -4,8 +4,6 @@
 // License: MIT
 // Author: Yuxuan Zhang (zhangyuxuan@ufl.edu)
 // =============================================================================
-#ifndef TARGET_DEMO
-
 #include "agent.h"
 #include "board.h"
 #include "esp32-hal.h"
@@ -32,6 +30,26 @@ public:
   }
 } watchdog;
 
+class PosSync : public Scheduler::Task {
+  static char buffer[256];
+
+public:
+  PosSync() : Scheduler::Task(Scheduler::Task::Recurrent{1000_ms}) {}
+  void tick(Scheduler::Micros now) override {
+    if (!Board::Drv::is_enabled())
+      return;
+    auto len = snprintf(buffer, sizeof(buffer), "POS 0=%ld 1=%ld 2=%ld",
+                        motors[0].state.position, motors[1].state.position,
+                        motors[2].state.position);
+    Global::tx.write_frame(Protocol::Method::SYN, Protocol::Property::NA,
+                           buffer, len);
+    Global::tx.encode_frame();
+    Global::tx.send_frame();
+  }
+} possync;
+
+char PosSync::buffer[256];
+
 void setup() {
   try {
     Serial.begin(Global::Config::SERIAL_BAUD_RATE);
@@ -45,7 +63,7 @@ void setup() {
     Board::init();
     Motor::init();
     auto &tasks = Global::scheduler.tasks;
-    tasks.clear().add(agent).add(watchdog);
+    tasks.clear().add(agent).add(watchdog).add(possync);
     for (auto &m : motors)
       tasks.add(m).add(m.subtask);
     Board::LED::BLUE.init();
@@ -56,5 +74,3 @@ void setup() {
 }
 
 void loop() {}
-
-#endif

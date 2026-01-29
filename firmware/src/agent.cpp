@@ -26,6 +26,14 @@ static const char identity[] = IDENTITY;
     WARN("%s is not supported", #METHOD "::" #PROPERTY);                       \
     break;
 
+#define CHECKED(type, prop, code)                                              \
+  if (!frame.check<type>()) {                                                  \
+    tx.send(Method::REJ, Property::prop, "Payload size mismatch");             \
+  } else {                                                                     \
+    auto &cmd = frame.as<Protocol::MotorHeader>();                             \
+    code;                                                                      \
+  }
+
 void Agent::tick(Micros) {
   if (!rx.valid)
     rx.recv();
