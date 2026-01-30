@@ -13,28 +13,31 @@
 #include "utils.h"
 #include <Arduino.h>
 
-class WatchDog : public Scheduler::Task {
+class Blinker : public Scheduler::Task {
 public:
-  WatchDog() : Scheduler::Task(Scheduler::Task::Recurrent{100_ms}) {}
-  unsigned report_counter = 0;
+  Blinker() : Scheduler::Task(Scheduler::Task::Recurrent{100_ms}) {}
   void tick(Scheduler::Micros now) override {
     Board::LED::BUILTIN.write(!Board::LED::BUILTIN.read());
-    if (++report_counter >= 50) {
-      report_counter = 0;
-      unsigned long duration = now - Global::scheduler.perf.since;
-      LOG("[PERF] Util=%.2f%%, Freq=%.2f tick/ms",
-          Global::scheduler.perf.utilization(duration) * 100.0,
-          Global::scheduler.perf.frequency(duration));
-      Global::scheduler.perf.reset();
-    }
   }
-} watchdog;
+} blinker;
+
+class PerfLogger : public Scheduler::Task {
+public:
+  PerfLogger() : Scheduler::Task(Scheduler::Task::Recurrent{10000_ms}) {}
+  void tick(Scheduler::Micros now) override {
+    unsigned long duration = now - Global::scheduler.perf.since;
+    LOG("[PERF] Util=%.2f%%, Freq=%.2f tick/ms",
+        Global::scheduler.perf.utilization(duration) * 100.0,
+        Global::scheduler.perf.frequency(duration));
+    Global::scheduler.perf.reset();
+  }
+} perf;
 
 class PosSync : public Scheduler::Task {
   static char buffer[256];
 
 public:
-  PosSync() : Scheduler::Task(Scheduler::Task::Recurrent{1000_ms}) {}
+  PosSync() : Scheduler::Task(Scheduler::Task::Recurrent{16_ms}) {}
   void tick(Scheduler::Micros now) override {
     if (!Board::Drv::is_enabled())
       return;
@@ -63,7 +66,7 @@ void setup() {
     Board::init();
     Motor::init();
     auto &tasks = Global::scheduler.tasks;
-    tasks.clear().add(agent).add(watchdog).add(possync);
+    tasks.clear().add(agent).add(blinker).add(perf).add(possync);
     for (auto &m : motors)
       tasks.add(m).add(m.subtask);
     Board::LED::BLUE.init();

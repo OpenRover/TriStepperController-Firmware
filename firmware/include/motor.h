@@ -56,6 +56,7 @@ typedef struct State {
   void reset() {
     mode = MODE_NONE;
     step_time = 0;
+    position = 0;
   }
 } State;
 
