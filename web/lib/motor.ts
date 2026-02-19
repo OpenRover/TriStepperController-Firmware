@@ -6,7 +6,7 @@
 
 import { reactive, ref, watch } from "vue";
 import { Method, Packet, Prop } from "./protocol";
-import { u8, u16, u64, i64, u32, i32 } from "./stdint";
+import { u8, u16, u32, i32 } from "./stdint";
 import driver from "./driver";
 import type { Local } from "./local";
 import local from "./local";

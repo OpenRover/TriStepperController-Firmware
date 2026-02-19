@@ -73,7 +73,7 @@ const segments = computed(() => {
           :fontSize="lim / 10"
           @select="(p) => p && onSelect(p)"
         >
-          <template v-for="{ a, b, hover } of segments">
+          <template v-for="{ a, b } of segments">
             <line
               v-if="b"
               :x1="a.x + 'px'"
