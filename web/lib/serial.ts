@@ -5,21 +5,10 @@
  * ------------------------------------------------------ */
 
 import AsyncChain from "async-chain-list";
-import type { AbortablePromise } from "./abortable";
+import { type AbortablePromise } from "./abortable";
 import abortable from "./abortable";
 import createEvent from "./event";
-
-function hex(n?: number, width = 4) {
-  return (
-    n?.toString(16).toUpperCase().padStart(width, "0") ?? "-".repeat(width)
-  );
-}
-
-export function hexView(data: Uint8Array) {
-  return Array.from(data)
-    .map((b) => hex(b, 2))
-    .join(" ");
-}
+import { hex, hexView } from "./util";
 
 export function getPortIdString(port?: SerialPort | null) {
   if (!port) return;
@@ -27,71 +16,91 @@ export function getPortIdString(port?: SerialPort | null) {
   return [hex(info.usbVendorId, 4), hex(info.usbProductId, 4)].join(":");
 }
 
-type Reader = ReadableStreamDefaultReader<Uint8Array>;
-type Writer = WritableStreamDefaultWriter<Uint8Array>;
-
 // Global serial communication singleton
 const serial = new (class Serial {
   private port: SerialPort | null = null;
-  private reader: Reader | null = null;
-  private writer: Writer | null = null;
   // RX stream reader
-  private task: AbortablePromise<void> | null = null;
-  // RX Stream multiplexer
-  private chain = new AsyncChain<Uint8Array>();
+  private rx_task: AbortablePromise<void> | null = null;
+  private tx_task: AbortablePromise<void> | null = null;
+  // RX Stream
+  private rx = new AsyncChain<Uint8Array>();
+  // TX Stream
+  private tx = new AsyncChain<Uint8Array>();
   // Events
   readonly onBeforeConnect = createEvent();
   readonly onConnect = createEvent();
   readonly onBeforeDisconnect = createEvent();
   readonly onDisconnect = createEvent();
 
+  private connected = false;
+
   public async connect(port: SerialPort, baudRate = 115200) {
-    await this.disconnect();
+    if (this.connected) await this.disconnect();
+    this.connected = true;
     this.port = port;
-    await Promise.allSettled(this.onBeforeConnect.dispatch());
+    await Promise.all(this.onBeforeConnect.dispatch());
     await port.open({ baudRate });
-    this.reader = port.readable?.getReader() ?? null;
-    this.writer = port.writable?.getWriter() ?? null;
-    this.task = abortable(async (abortable) => {
-      const { reader } = this;
-      if (!reader)
-        return console.warn("Port", getPortIdString(this.port), "not readable");
-      abortable.onAbort(() => reader.cancel());
+    const portName = getPortIdString(port);
+    this.rx_task = abortable(async (abortable) => {
+      const reader = port.readable?.getReader() ?? null;
       try {
+        if (!reader) return console.warn("Port", portName, "not readable");
+        abortable.onAbort(() => reader.cancel());
         while (!abortable.aborted) {
           const { value, done } = await reader.read();
           if (done) break;
           if (!value) continue;
-          this.chain = this.chain.push(value);
+          this.rx = this.rx.push(value);
         }
       } catch (e) {
         console.error("Serial read error:", e);
+        this.disconnect();
+      } finally {
+        reader?.releaseLock();
+        this.rx_task = null;
       }
     });
-    await Promise.allSettled(this.onConnect.dispatch());
+    this.tx_task = abortable(async (abortable) => {
+      try {
+        for await (const chunk of abortable.iter(this.tx)) {
+          const writer = port.writable?.getWriter() ?? null;
+          if (!writer) continue;
+          try {
+            await writer.ready;
+            await writer.write(chunk);
+          } catch (e) {
+            console.error("Serial write error:", e);
+          } finally {
+            writer.releaseLock();
+          }
+        }
+      } finally {
+        this.tx_task = null;
+        this.disconnect();
+      }
+    });
+    await Promise.all(this.onConnect.dispatch());
   }
 
   public async disconnect() {
-    const { port, task } = this;
-    if (!port && !task) return;
+    if (!this.connected) return;
+    this.connected = false;
     await Promise.allSettled(this.onBeforeDisconnect.dispatch());
+    await Promise.allSettled([this.rx_task?.abort(), this.tx_task?.abort()]);
+    await this.port?.close();
     this.port = null;
-    this.task = null;
-    await task?.abort();
-    this.reader = (this.reader?.releaseLock(), null);
-    this.writer = (this.writer?.releaseLock(), null);
-    await port?.close();
-    await Promise.allSettled(this.onDisconnect.dispatch());
+    await Promise.all(this.onDisconnect.dispatch());
   }
 
-  public send(data: Uint8Array) {
-    const { writer } = this;
-    if (!writer) throw new Error("Serial port not connected or not writable");
-    return writer.write(data);
+  public write(data: Uint8Array) {
+    if (this.port === null) throw new Error("Serial port not connected");
+    if (!this.tx_task) throw new Error("Serial port TX task not running");
+    console.log("RAW TX:", hexView(data));
+    this.tx = this.tx.push(data);
   }
 
   public [Symbol.asyncIterator]() {
-    return this.chain[Symbol.asyncIterator]();
+    return this.rx[Symbol.asyncIterator]();
   }
 })();
 

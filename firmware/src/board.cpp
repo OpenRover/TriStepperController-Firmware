@@ -8,6 +8,22 @@
 
 namespace Board {
 
+namespace Port {
+struct SPI SPI {
+  .MISO = {D12, INPUT}, .MOSI = {D11, OUTPUT}, .CS = {D10, OUTPUT, true},
+  .SCLK = {D13, OUTPUT},
+};
+struct I2C_ColorSensor I2C_ColorSensor{
+    .LED = {A2, OUTPUT},
+    .INT = {A3, INPUT},
+    .SDA = {A4, INPUT_PULLUP},
+    .SCL = {A5, INPUT_PULLUP},
+};
+struct WS2812 WS2812 {
+  .DATA = {B1, OUTPUT},
+};
+} // namespace Port
+
 namespace LED {
 Pin BUILTIN(LED_BUILTIN, OUTPUT);
 Pin RED(LED_RED, OUTPUT);

@@ -6,19 +6,19 @@
 
 import { reactive, ref, watch } from "vue";
 import { Method, Packet, Prop } from "./protocol";
-import { u8, u16, u64, i64 } from "./stdint";
+import { u8, u16, u64, i64, u32, i32 } from "./stdint";
 import driver from "./driver";
 import type { Local } from "./local";
 import local from "./local";
-import { approach } from "./util";
+import { type Motion, trapezoidal, discretize } from "./motion";
 
 export class MotorConfig {
-  invert: number = 0; // forward = HIGH(false) or LOW(true)
   micro_steps: number = 16; // 1, 2, 4, 8, 16, 32, 64, 128, 256
   stall_sensitivity: number = 50; // 0 - 255, 0 = disabled
   rms_current: number = 1000; // mA
   // Host side only
   active: boolean = false; // whether motor is in active use
+  invert: number = 0; // forward = HIGH(false) or LOW(true)
   scale: number = 1.0; // revolutions per unit distance
   unit: string = "unit"; // unit name
   // Trapezoidal control parameters
@@ -26,6 +26,10 @@ export class MotorConfig {
   min_vel: number = 0.1; // units per second
   max_vel: number = 10.0; // units per second
   max_acc: number = 10.0; // units per second squared
+  // Motion planner parameters
+  max_delay: number = 100; // milliseconds
+  min_segment: number = 16; // milliseconds
+
   get steps_per_unit(): number {
     return 200 * this.micro_steps * this.scale;
   }
@@ -36,18 +40,17 @@ export class MotorConfig {
   pack(id: number) {
     return [
       u8(id),
-      u8(this.invert),
       u8(this.micro_steps),
       u8(this.stall_sensitivity),
       u16(this.rms_current),
     ];
   }
-  async send(id: number) {
+  async apply(id: number) {
     const packed = this.pack(id);
-    await driver.send(Packet.encode(Method.SET, Prop.MOT_CFG, ...packed));
-    await driver
-      .wait(Method.ACK, Prop.MOT_CFG, ([_id]) => id === _id)
-      .timeout(1000);
+    await driver.request(
+      Packet.encode(Method.SET, Prop.MOT_CFG, ...packed),
+      1000,
+    );
   }
   save(key: string) {
     localStorage.setItem(key, JSON.stringify(this));
@@ -65,15 +68,14 @@ export class MotorConfig {
     }
   }
   static unpack(data: Uint8Array) {
-    if (data.length < 6)
+    if (data.length < 5)
       throw new Error("Data too short to unpack MotorConfig");
-    const [id, invert, micro_steps, stall_sensitivity, ...rc] = data;
+    const [id, micro_steps, stall_sensitivity, rc_l, rc_h] = data;
     return {
       id,
-      invert,
       micro_steps,
       stall_sensitivity,
-      rms_current: rc[0]! | (rc[1]! << 8),
+      rms_current: rc_l! | (rc_h! << 8),
     };
   }
 }
@@ -85,80 +87,81 @@ export default class Motor {
   get position() {
     return Number(this.#position.value) / this.config.steps_per_unit;
   }
+  get position_steps() {
+    return this.#position.value;
+  }
+  set position(value: number) {
+    const steps = BigInt(Math.round(value * this.config.steps_per_unit));
+    this.#position.value = steps;
+  }
+  set position_steps(value: bigint) {
+    this.#position.value = value;
+  }
 
-  #target = ref<bigint>(0n); // absolute step position
+  readonly #position_transient = ref<bigint>(0n); // transient step position
+  get position_transient() {
+    return Number(this.#position_transient.value) / this.config.steps_per_unit;
+  }
+
+  #target = ref<number>(0); // units
   get target() {
-    return Number(this.#target.value) / this.config.steps_per_unit;
+    return this.#target.value;
+  }
+  private get target_steps() {
+    return BigInt(Math.round(this.#target.value * this.config.steps_per_unit));
+  }
+  private set target_steps(value: bigint) {
+    this.#target.value = Number(value) / this.config.steps_per_unit;
   }
   set target(value: number) {
     if (this.enabled) {
-      this.#target.value = BigInt(
-        Math.round(value * this.config.steps_per_unit),
-      );
-      this.move();
+      this.#target.value = value;
+      this.plan();
     }
   }
 
   #speed_manual: Local<number>; // units per second
-  #speed_trapezoidal = ref(0); // units per second, can be negative
+  #speed_transient = ref(0); // units per second
   get speed() {
     return this.config.trapezoidal
-      ? this.#speed_trapezoidal.value
+      ? this.#speed_transient.value
       : this.#speed_manual.value;
+  }
+  get speed_steps_per_sec() {
+    return this.speed * this.config.steps_per_unit;
   }
   set speed(value: number) {
     if (this.config.trapezoidal) {
       console.warn("Cannot set speed in trapezoidal mode");
     } else {
       this.#speed_manual.value = value;
-      this.move();
+      this.plan();
     }
-  }
-
-  /**
-   * In a linear motion involving multiple axes, the proportion defines how
-   * much motion component this motor contributes to the overall motion.
-   * Speed and accelerations are scaled accordingly.
-   */
-  #proportion = ref(1.0);
-  get proportion() {
-    return this.#proportion.value;
-  }
-  set proportion(value: number) {
-    this.#proportion.value = value;
   }
 
   #enabled = ref<boolean>(false);
   get enabled() {
     return this.#enabled.value;
   }
-  async enable() {
+  async enable(timeout?: number) {
     if (!this.config.active) return;
-    await this.config.send(this.id);
-    await driver.send(
+    await this.config.apply(this.id);
+    await driver.request(
       Packet.encode(Method.SET, Prop.MOT_ENA, u8(this.id), u8(0x01)),
+      timeout,
     );
-    await driver
-      .wait(Method.ACK, Prop.MOT_ENA, ([id, en]) => this.match(id) && en)
-      .timeout(1000);
     this.#enabled.value = true;
   }
-  async disable() {
-    await driver.send(
+  async disable(timeout?: number) {
+    await driver.request(
       Packet.encode(Method.SET, Prop.MOT_ENA, u8(this.id), u8(0x00)),
+      timeout,
     );
-    await driver
-      .wait(Method.ACK, Prop.MOT_ENA, ([id, en]) => this.match(id) && !en)
-      .timeout(1000);
     this.#enabled.value = false;
   }
 
   get local_storage_key() {
     return `motor/config:${this.id}`;
-  }
-
-  private match(id?: number) {
-    return id === this.id;
   }
 
   constructor(public readonly id: number) {
@@ -172,133 +175,154 @@ export default class Motor {
       () => this.config.pack(this.id),
       async () => {
         const packed = this.config.pack(this.id);
-        const prev_position = this.position;
-        await driver.send(Packet.encode(Method.SET, Prop.MOT_CFG, ...packed));
-        await driver
-          .wait(Method.ACK, Prop.MOT_CFG, ([id]) => this.match(id))
-          .timeout(1000);
-        await this.setPosition(prev_position);
+        await driver.request(
+          Packet.encode(Method.SET, Prop.MOT_CFG, ...packed),
+          1000,
+        );
       },
     );
-    driver.onEnable(() => this.enable());
-    driver.onBeforeDisable(() => this.disable());
+    driver.onEnable(() => this.enable(1000));
+    driver.onBeforeDisable(() => this.disable(1000));
     watch(this.#enabled, (en) => {
       if (!en) {
         this.#position.value = 0n;
-        this.#target.value = 0n;
+        this.#target.value = 0;
+      } else {
+        this.plan();
       }
     });
-    // Subscribe to position updates
-    (async () => {
-      const id = this.id.toString();
-      for await (const msg of driver.SYN) {
-        try {
-          if (msg.type === "POS" && msg.has(id)) {
-            this.#position.value = BigInt(msg.get(id)!);
-            if (this.enabled && this.config.trapezoidal)
-              this.trapezoidalUpdate();
-          }
-        } catch (e) {
-          console.warn("Failed to parse motor position message:", msg, e);
+    watch(
+      () => this.config.active,
+      (active) => {
+        if (driver.enabled) {
+          if (active) this.enable(1000);
+          else this.disable(1000);
         }
-      }
-    })();
+      },
+    );
   }
 
-  private get target_position_steps() {
-    if (this.config.trapezoidal) {
-      return this.#trapezoidal_overshoot.value ?? this.#target.value;
+  public plan() {
+    // Clear pending motions
+    this.motion_queue.length = 0;
+    // Config parameters
+    const { max_delay, min_segment } = this.config;
+    // Current motion state
+    const x0 = this.position_steps;
+    const x1 = this.target_steps;
+    console.log(`Motor ${this.id} planning from ${x0} to ${x1}`);
+    if (!this.config.trapezoidal) {
+      // Simple planning: constant speed, split into segments to avoid long blocking
+      const direction = Math.sign(Number(x1 - x0));
+      if (direction === 0) return;
+      this.motion_queue.push(
+        ...discretize({
+          dx: Number(x1 - x0),
+          v0: direction * this.speed_steps_per_sec,
+          dt: 1e-3 * Math.max(max_delay / 2, min_segment),
+        }),
+      );
     } else {
-      return this.#target.value;
+      // Trapezoidal planning: accelerate to max speed, cruise, then decelerate
+      const v0 = this.#speed_transient.value * this.config.steps_per_unit; // current speed in steps per second
+      const dx = Number(x1 - x0); // distance to travel in steps
+      const v_max = this.config.max_vel * this.config.steps_per_unit; // steps per second
+      const acc = this.config.max_acc * this.config.steps_per_unit; // steps per second squared
+      const dt = min_segment * 1e-3; // time resolution in seconds
+      for (const motion of trapezoidal(dx, v0, 0, v_max, acc)) {
+        console.log(motion);
+        this.motion_queue.push(...discretize({ ...motion, dt }));
+      }
+    }
+    console.log("queued:", [...this.motion_queue]);
+    this.queue();
+  }
+
+  // Set position without moving the motor, used for homing
+  public resetPosition() {
+    this.#position.value = 0n;
+    this.#target.value = 0;
+    this.#position_transient.value = 0n;
+    this.plan();
+  }
+
+  private t_next_mot_ack = performance.now();
+  private readonly dispatched_motion = new Map<symbol, number>();
+  get motion_delay() {
+    let delay = 0;
+    for (const d of this.dispatched_motion.values()) delay += d;
+    return delay;
+  }
+  get dispatched_motion_count() {
+    return this.dispatched_motion.size;
+  }
+
+  private async dispatch(
+    { steps, interval }: Motion,
+    duration: number = (steps * interval) / 1000,
+  ) {
+    const token = Symbol();
+    const delta = BigInt(steps);
+    try {
+      this.dispatched_motion.set(token, duration);
+      this.position_steps += delta;
+      const speed = 1e6 / interval / this.config.steps_per_unit;
+      this.#speed_transient.value = speed;
+      console.log({ speed });
+      let timeout = this.motion_delay;
+      const now = performance.now();
+      if (this.t_next_mot_ack > now) timeout += this.t_next_mot_ack - now;
+      timeout += steps * interval * 1e-3; // add expected motion duration
+      const packet = Packet.encode(
+        Method.SET,
+        Prop.MOT_MOV,
+        u8(this.id),
+        i32(this.config.invert ? -steps : steps),
+        u32(interval),
+      );
+      await driver.request(packet, timeout + 10000);
+      this.t_next_mot_ack = performance.now() + this.motion_delay;
+      this.#position_transient.value += delta;
+    } catch (e) {
+      this.position_steps -= delta;
+      this.target_steps -= delta;
+      console.warn("Failed to dispatch motion:", e);
+    } finally {
+      this.dispatched_motion.delete(token);
+      this.queue();
     }
   }
 
-  private get step_interval() {
-    const { steps_per_unit, trapezoidal, min_vel } = this.config;
-    // Get relative speed (units per second)
-    let relative_speed = Math.abs(this.speed);
-    // In case of trapezoidal control, don't allow zero speed
-    if (trapezoidal && relative_speed < min_vel) relative_speed = min_vel;
-    // Convert to absolute speed (steps per second)
-    const absolute_speed = Math.abs(relative_speed * steps_per_unit);
-    // Return step interval in microseconds
-    return absolute_speed > 0 ? 1e6 / absolute_speed : 0;
-  }
-
-  public move(target?: number | null, speed?: number | null) {
-    if (typeof target === "number" && !isNaN(target)) this.target = target;
-    if (typeof speed === "number" && !isNaN(speed)) this.speed = speed;
-    const payload = [
-      // Motor ID
+  private async barrier() {
+    const packet = Packet.encode(
+      Method.SET,
+      Prop.MOT_MOV,
       u8(this.id),
-      // Target position (int64)
-      i64(this.target_position_steps),
-      // Step interval in us (uint64)
-      u64(this.step_interval),
-    ];
-    return driver.send(Packet.encode(Method.SET, Prop.MOT_MOV, ...payload));
-  }
-
-  public setPosition(position: number = 0) {
-    this.target = position;
-    const payload = [
-      // Motor ID
-      u8(this.id),
-      // Target position (int64)
-      i64(this.#target.value),
-      // Step interval in us (uint64)
-      u64(0),
-    ];
-    return driver.send(Packet.encode(Method.SET, Prop.MOT_MOV, ...payload));
-  }
-
-  private last_tick = performance.now();
-  private tick(dt_max = 1.0) {
-    const now = performance.now();
-    const dt = (now - this.last_tick) / 1000.0; // seconds
-    this.last_tick = now;
-    return Math.min(dt, dt_max);
-  }
-
-  #trapezoidal_overshoot = ref<number | null>(null);
-  public trapezoidalUpdate() {
-    const dt = this.tick();
-    if (!this.config.trapezoidal) return;
-    const { min_vel: V0, max_vel: V1, max_acc: A } = this.config;
-    const { position, target, speed: v0 } = this;
-    const d = target - position; // distance to target (signed)
-    // Termination condition: slow approach near target
-    if (Math.abs(v0) <= V0 && Math.abs(d / V0) < V0 / A) {
-      this.#speed_trapezoidal.value = 0;
-      this.#trapezoidal_overshoot.value = null;
-      return;
+      i32(0),
+      u32(0),
+    );
+    try {
+      await driver.request(packet);
+      this.#speed_transient.value = 0;
+    } catch {
+    } finally {
+      this.queue();
     }
-    // Suppose start braking now, compute distance until stop
-    const break_distance = (Math.sign(v0) * v0 ** 2) / (2 * A);
-    // Stop position relative to target position
-    const stop_pos = d - break_distance;
-    const side = Math.sign(d) * Math.sign(stop_pos);
-    let v1: number;
-    switch (side) {
-      case +1:
-        // Undershoot, accelerate towards target
-        v1 = Math.sign(d) * V1;
-        this.#trapezoidal_overshoot.value = null;
-        break;
-      case -1:
-        // Overshoot
-        v1 = 0;
-        this.#speed_trapezoidal.value = approach(v0, 0, A * dt);
-        break;
-      case 0:
-      default:
-        // Will stop exactly at target
-        v1 = 0;
-        this.#speed_trapezoidal.value = approach(v0, 0, A * dt);
-        return;
+  }
+
+  readonly motion_queue: Motion[] = [];
+
+  private async queue() {
+    await new Promise((r) => setTimeout(r, 0));
+    // Dispatch motions to fill the plan window
+    while (this.motion_queue.length > 0) {
+      const motion = this.motion_queue[0]!;
+      const duration = Math.max(1, motion.steps) * motion.interval * 1e-3; // milliseconds
+      if (this.motion_delay + duration > this.config.max_delay) break;
+      this.dispatch(motion, duration);
+      this.motion_queue.shift();
+      await new Promise((r) => setTimeout(r, 0));
     }
-    this.#speed_trapezoidal.value = approach(v0, v1, A * dt);
-    this.move();
   }
 }
 

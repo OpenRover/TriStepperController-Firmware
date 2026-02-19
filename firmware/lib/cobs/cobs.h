@@ -40,6 +40,13 @@ public:
     return static_cast<T>(*data);
   }
   int16_t decode(bool (*available)(), char (*read)());
+  // For debugging
+  uint8_t raw[512];
+  unsigned raw_index = 0;
+  inline void reset() {
+    Buffer::reset();
+    raw_index = 0;
+  }
 };
 
 class TX : public Buffer {
@@ -54,5 +61,7 @@ public:
     }
   }
 };
+
+const char *errorno(int16_t code);
 
 } // namespace COBS

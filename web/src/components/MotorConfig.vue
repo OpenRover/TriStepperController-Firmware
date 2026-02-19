@@ -62,7 +62,7 @@ const invert = computed({
     <div class="entry">
       <span class="label">Current</span>
       <input
-        type="number"
+       
         v-model.number="motor.config.rms_current"
         step="10"
       />
@@ -74,13 +74,13 @@ const invert = computed({
     </div>
     <div class="entry">
       <span class="label">Scale</span>
-      <input type="number" v-model.number="motor.config.scale" />
+      <input v-model.number="motor.config.scale" />
       <span class="unit">Rev/<Editable v-model="motor.config.unit" /></span>
     </div>
     <div class="entry">
       <span class="label">Speed</span>
       <input
-        type="number"
+       
         v-model.number="motor.speed"
         step="1"
         :disabled="motor.config.trapezoidal"
@@ -89,10 +89,10 @@ const invert = computed({
     </div>
     <div class="entry compact">
       <span class="label">Position</span>
-      <input type="number" :value="motor.position" disabled />
+      <input :value="motor.position" disabled />
       &nbsp;&rarr;&nbsp;
       <input
-        type="number"
+       
         v-model.number="motor.target"
         :disabled="!motor.enabled"
       />
@@ -104,17 +104,27 @@ const invert = computed({
     </div>
     <div class="entry compact" :class="{ inactive: !motor.config.trapezoidal }">
       <span class="label">Speed Range</span>
-      <input type="number" v-model.number="motor.config.min_vel" />
+      <input v-model.number="motor.config.min_vel" />
       &nbsp;-&nbsp;
-      <input type="number" v-model.number="motor.config.max_vel" />
+      <input v-model.number="motor.config.max_vel" />
       <span class="unit"><Editable v-model="motor.config.unit" />/s</span>
     </div>
     <div class="entry" :class="{ inactive: !motor.config.trapezoidal }">
       <span class="label">Acceleration</span>
-      <input type="number" v-model.number="motor.config.max_acc" step="1" />
+      <input v-model.number="motor.config.max_acc" step="1" />
       <span class="unit"
         ><Editable v-model="motor.config.unit" />/s<sup>2</sup></span
       >
+    </div>
+    <div class="entry">
+      <span class="label">Motion Delay</span>
+      <input v-model.number="motor.config.max_delay" step="1" />
+      <span class="unit">ms</span>
+    </div>
+    <div class="entry">
+      <span class="label">Resolution</span>
+      <input v-model.number="motor.config.min_segment" step="1" />
+      <span class="unit">ms</span>
     </div>
   </div>
 </template>

@@ -9,123 +9,115 @@
 #include <TMCStepper.h>
 
 #include "board.h"
-#include "esp32-hal.h"
+#include "duration_literals.h"
+#include "global.h"
+#include "protocol-header.h"
+#include "protocol-impl.h"
+#include "ring-buffer.h"
 
-#include <protocol-impl.h>
-#include <protocol.h>
-#include <scheduler.h>
+void motorTick();
 
 namespace Motor {
+using Sequence = Protocol::Sequence;
 
-void init();
+typedef struct Command {
+  Sequence seq;
+  Steps steps;
+  Interval interval;
+} Command;
 
-typedef signed long Steps;
-
-inline int direction(const bool &&forward, const bool &invert) {
-  const auto dir = forward ? HIGH : LOW;
-  return invert ? !dir : dir;
-}
-
-typedef struct State {
-  enum : uint8_t {
-    MODE_NONE = 0,
-    MODE_HOME,
-    MODE_NORM,
-  } mode;
-  Scheduler::Micros step_time;
-  Steps position;
-  union {
-    struct {
-      Protocol::Direction direction;
-      uint8_t endstop; // 0 for sensor-less homing, others for endstop ID
-      enum : uint8_t {
-        HOME_INIT, // Untangle endstop switch by moving reverse
-        HOME_MOVE, // Move forward until endstop is triggered
-        HOME_DONE, // Homing is done, waiting for next command
-      } status;
-      inline void init(const Protocol::MotorHome &cmd) {
-        status = HOME_INIT;
-        direction = cmd.direction;
-        endstop = cmd.endstop;
-      }
-    } home;
-    struct {
-      Steps target; // Target position in steps
-    } norm;
-  };
-  void reset() {
-    mode = MODE_NONE;
-    step_time = 0;
-    position = 0;
-  }
-} State;
-
-class Motor : public Scheduler::Task {
-private:
-  void update_config();
-  void wait_online();
-  void subroutine_home(Scheduler::Micros now);
-  void subroutine_norm(Scheduler::Micros now);
-
+class Motor {
 public:
   const Board::Pin &step, &dir, &diag;
   const uint8_t addr;
   TMC2209Stepper driver;
-  State state;
+
+  inline Motor(Board::Drv &drv, uint8_t addr)
+      : driver(TMC2209Stepper(reinterpret_cast<Stream *>(&Board::Drv::serial),
+                              0.11f, addr)),
+        step(drv.step), dir(drv.dir), diag(drv.diag), addr(addr) {}
+
+  // Flag indicating whether the motor is enabled
+  // ISR handler skips disabled motors
+  volatile bool enabled = false;
+  // Temporarily make ISR skip this motor to avoid race conditions
+  volatile bool lock = false;
+
+  inline bool isAvailableForISR() { return enabled && !lock; }
+  // ISR maintained state
+  Micros last_step;
+  Steps steps;
+  Interval interval;
+
+  // Pending move commands [Producer: main thread | Consumer: ISR]
+  RingBuffer<Command, 256> pending;
+  // Completed move commands [Producer: ISR | Consumer: main thread]
+  RingBuffer<Sequence, 512> done;
+
+  inline bool online() { return driver.test_connection() == 0; }
+  void updateConfig(const Protocol::MotorConfig::Config *cfg = nullptr);
+
   Protocol::MotorConfig::Config config = {
-      .invert = false,
       .micro_steps = 32,
       .stall_sensitivity = 40,
       .rms_current = 1000,
   };
 
-  class Subtask : public Scheduler::Task {
-  public:
-    Motor &motor;
-    Subtask(Motor &motor)
-        : Scheduler::Task(Scheduler::Task::Once{false}), motor(motor) {}
-    void tick(Scheduler::Micros now) override;
-  } subtask;
-
-  inline Motor(Board::Drv &drv, uint8_t addr)
-      : Scheduler::Task(Scheduler::Task::Once{false}),
-        driver(TMC2209Stepper(reinterpret_cast<Stream *>(&Board::Drv::serial),
-                              0.11f, addr)),
-        step(drv.step), dir(drv.dir), diag(drv.diag), addr(addr),
-        subtask(*this) {
-    state.reset();
+  inline void init() {
+    dir.init();
+    step.init();
+    diag.init();
+    driver.begin();
+    this->disable();
   }
-
-  inline bool enabled() { return state.mode != State::MODE_NONE; };
-  void init();
-  void enable();
-  void disable();
-  void configure(const Protocol::MotorConfig::Config &cfg);
-  void configure(const Protocol::MotorConfig::Config &&cfg);
-  void tick(Scheduler::Micros now) override;
-
-  // Blocking function
-  inline void run(double revolutions, Scheduler::Micros step_time) {
-    if (!enabled())
-      throw std::runtime_error("Motor is not enabled");
-    const auto steps =
-        static_cast<Steps>(std::abs(revolutions) * 20 * config.micro_steps);
-    if (steps <= 0)
+  inline void enable() {
+    if (enabled)
       return;
-    const auto d = direction(revolutions > 0.0, config.invert);
-    if (dir.read() != d) {
-      dir.write(d);
-      delayMicroseconds(1);
+    updateConfig();
+    driver.toff(5);
+    last_step = micros();
+    enabled = true;
+  }
+  inline void disable() {
+    enabled = false;
+    driver.toff(0);
+    // Resolve all completed commands
+    while (done.readable()) {
+      Global::tx.send(done.peek(), Protocol::Method::ACK,
+                      Protocol::Property::MOT_MOV);
+      done.pop();
     }
-    for (unsigned long i = 0; i < steps; i++) {
-      step.write(HIGH);
-      delayMicroseconds(1);
-      step.write(LOW);
-      delayMicroseconds(step_time > 2_us ? step_time - 1_us : 1_us);
+    // Reject all pending commands
+    while (pending.readable()) {
+      Global::tx.print(pending.peek().seq, Protocol::Method::REJ,
+                       Protocol::Property::MOT_MOV, "Motor Disabled");
+      pending.pop();
     }
+    // Reset ISR maintained state
+    steps = 0;
+    interval = 0;
   }
 };
 
 } // namespace Motor
 
 extern Motor::Motor motors[3];
+
+inline Motor::Motor *getMotorByID(MotorID id) {
+  for (auto &motor : motors) {
+    if (motor.addr == id)
+      return &motor;
+  }
+  return nullptr;
+}
+
+namespace Motor {
+
+inline void init() {
+  Board::Drv::init();
+  Board::Drv::enable();
+  for (auto &motor : motors)
+    motor.init();
+}
+
+} // namespace Motor

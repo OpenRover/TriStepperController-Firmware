@@ -5,26 +5,22 @@
 
 #pragma once
 
-constexpr unsigned long long operator"" _s(unsigned long long val) {
-  return val * 1000000;
+typedef unsigned long long Micros;
+
+constexpr Micros operator""_s(unsigned long long val) { return val * 1000000; }
+
+constexpr Micros operator""_s(long double val) {
+  return static_cast<Micros>(val * 1000000);
 }
 
-constexpr unsigned long long operator"" _s(long double val) {
-  return static_cast<unsigned long long>(val * 1000000);
+constexpr Micros operator""_ms(unsigned long long val) { return val * 1000; }
+
+constexpr Micros operator""_ms(long double val) {
+  return static_cast<Micros>(val * 1000);
 }
 
-constexpr unsigned long long operator"" _ms(unsigned long long val) {
-  return val * 1000;
-}
+constexpr Micros operator""_us(unsigned long long val) { return val; }
 
-constexpr unsigned long long operator"" _ms(long double val) {
-  return static_cast<unsigned long long>(val * 1000);
-}
-
-constexpr unsigned long long operator"" _us(unsigned long long val) {
-  return val;
-}
-
-constexpr unsigned long long operator"" _us(long double val) {
-  return static_cast<unsigned long long>(val);
+constexpr Micros operator""_us(long double val) {
+  return static_cast<Micros>(val);
 }

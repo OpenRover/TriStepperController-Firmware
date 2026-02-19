@@ -3,192 +3,269 @@
 // Author: Yuxuan Zhang (zhangyuxuan@ufl.edu)
 // =============================================================================
 #include "agent.h"
+#include "board.h"
+#include "debug.h"
+#include "esp32-hal.h"
+#include "esp_task_wdt.h"
+#include "global.h"
 #include "motor.h"
+#include "protocol-impl.h"
 #include "protocol.h"
-#include "utils.h"
 #include "version.h"
 
-#include <protocol-impl.h>
-
-Agent agent(Global::rx, Global::tx);
-
-using namespace Scheduler;
 using namespace Protocol;
+using Global::rx;
+using Global::tx;
 
 static const char identity[] = IDENTITY;
 
 #define HEADER(METHOD, PROPERTY)                                               \
   Header::compose(Method::METHOD, Property::PROPERTY)
 
-#define UNSUPPORTED(METHOD, PROPERTY)                                          \
-  case HEADER(METHOD, PROPERTY):                                               \
-    tx.send(Method::REJ, Property::PROPERTY);                                  \
-    WARN("%s is not supported", #METHOD "::" #PROPERTY);                       \
-    break;
+#define REPLY(M, P, ...)                                                       \
+  TRACE("tx.send(" #M "::" #P ")");                                            \
+  tx.send(seq, Method::M, Property::P __VA_OPT__(, ) __VA_ARGS__)
 
-#define CHECKED(type, prop, code)                                              \
-  if (!frame.check<type>()) {                                                  \
-    tx.send(Method::REJ, Property::prop, "Payload size mismatch");             \
-  } else {                                                                     \
-    auto &cmd = frame.as<Protocol::MotorHeader>();                             \
-    code;                                                                      \
+#define PRINT(M, P, MSG)                                                       \
+  TRACE("tx.print(" #M "::" #P ")");                                           \
+  tx.print(seq, Method::M, Property::P, MSG)
+
+static constexpr auto BAD_PAYLOAD = "Invalid payload";
+static constexpr auto NO_SUCH_MOTOR = "No such motor";
+static constexpr auto MOTOR_OFFLINE = "Motor Offline";
+static constexpr auto MOTOR_DISABLED = "Motor Disabled";
+static constexpr auto MOTOR_QUEUE_FULL = "Motor Queue Full";
+
+#define HANDLE_COMMAND(METHOD, PROP, PAYLOAD_TYPE, CODE)                       \
+  case HEADER(METHOD, PROP): {                                                 \
+    TRACE(#METHOD "::" #PROP);                                                 \
+    const auto cmd = frame.as<PAYLOAD_TYPE>();                                 \
+    if (cmd == nullptr) {                                                      \
+      PRINT(REJ, PROP, BAD_PAYLOAD);                                           \
+      break;                                                                   \
+    }                                                                          \
+    CODE;                                                                      \
+    break;                                                                     \
   }
 
-void Agent::tick(Micros) {
-  if (!rx.valid)
-    rx.recv();
-  if (!rx.valid)
-    return;
-  rx.valid = false;
-  const auto &frame = rx.frame;
+#define MOTOR_COMMAND(PROP, CODE)                                              \
+  auto motor = getMotorByID(cmd->id);                                          \
+  if (motor) {                                                                 \
+    CODE                                                                       \
+  } else {                                                                     \
+    PRINT(REJ, PROP, NO_SUCH_MOTOR);                                           \
+  }
+
+inline void processFrame(const Frame &frame) {
+  const auto &seq = frame.header.sequence;
   const auto &code = frame.header.code;
+  DEBUG("RX [%06d] %s::%s\n", seq,
+        convert<const char *const>(frame.header.method()),
+        convert<const char *const>(frame.header.property()));
   switch (code) {
   case HEADER(GET, FW_INFO):
-    tx.write_frame(Method::ACK, Property::FW_INFO, identity, sizeof(identity));
-    tx.encode_frame();
-    tx.send_frame();
+    TRACE("GET::FW_INFO");
+    PRINT(ACK, FW_INFO, identity);
     break;
-    UNSUPPORTED(SET, FW_INFO);
   case HEADER(SET, SYS_ENA): {
-    const auto &enable = frame.as<Protocol::SystemEnable>();
-    if (enable) {
+    TRACE("SET::SYS_ENA");
+    const auto enable = frame.as<Protocol::SystemEnable>();
+    if (enable == nullptr) {
+      PRINT(REJ, SYS_ENA, BAD_PAYLOAD);
+      break;
+    } else if (*enable) {
       Board::Drv::enable();
     } else {
       for (auto &motor : motors)
+        // Not checking motor online here because master EN command should
+        // always take effect
         motor.disable();
       Board::Drv::disable();
     }
-    tx.send(Method::ACK, Property::SYS_ENA, Board::Drv::is_enabled());
+    REPLY(ACK, SYS_ENA, Board::Drv::is_enabled());
     break;
   }
   case HEADER(GET, SYS_ENA):
-    tx.send(Method::ACK, Property::SYS_ENA, Board::Drv::is_enabled());
+    TRACE("GET::SYS_ENA");
+    REPLY(ACK, SYS_ENA, Board::Drv::is_enabled());
     break;
-  case HEADER(GET, MOT_ENA): {
-    auto &cmd = frame.as<Protocol::MotorHeader>();
-    for (auto &motor : motors) {
-      if (motor.addr != cmd.id)
-        continue;
-      const Protocol::MotorEnable res = {
-          .id = cmd.id,
-          .enable = motor.enabled(),
-      };
-      tx.send(Method::ACK, Property::MOT_ENA, res);
-    }
-  }
-  case HEADER(SET, MOT_ENA): {
-    auto &cmd = frame.as<Protocol::MotorEnable>();
-    for (auto &motor : motors) {
-      if (motor.addr != cmd.id)
-        continue;
-      if (cmd.enable)
-        motor.enable();
-      else
-        motor.disable();
-      tx.send(Method::ACK, Property::MOT_ENA, cmd);
-    }
-    break;
-  }
-  case HEADER(GET, MOT_CFG): {
-    auto &cfg = frame.as<Protocol::MotorHeader>();
-    for (auto &motor : motors) {
-      if (motor.addr != cfg.id)
-        continue;
-      Protocol::MotorConfig cfg;
-      cfg.id = motor.addr;
-      cfg.config = motor.config;
-      tx.send(Method::ACK, Property::MOT_CFG, cfg);
-    }
-    break;
-  }
-  case HEADER(SET, MOT_CFG): {
-    auto &cfg = frame.as<Protocol::MotorConfig>();
-    for (auto &motor : motors) {
-      if (motor.addr != cfg.id)
-        continue;
-      motor.configure(cfg.config);
-      tx.send(Method::ACK, Property::MOT_CFG, cfg);
-    }
-    break;
-  }
-  case HEADER(GET, MOT_MOV): {
-    const auto &cmd = frame.as<Protocol::MotorHeader>();
-    for (auto &motor : motors) {
-      if (motor.addr != cmd.id)
-        continue;
-      const Protocol::MotorMove res = {
-          .id = cmd.id,
-          .target = motor.state.norm.target,
-          .step_time = motor.state.step_time,
-      };
-      tx.send(Method::ACK, Property::MOT_MOV, res);
-    }
-    break;
-  }
-  case HEADER(SET, MOT_MOV): {
-    const auto &cmd = frame.as<Protocol::MotorMove>();
-    for (auto &motor : motors) {
-      if (motor.addr != cmd.id)
-        continue;
-      if (cmd.step_time == 0) {
-        motor.state.position = cmd.target;
-        const Protocol::MotorMove res = {
-            .id = cmd.id,
-            .target = cmd.target,
-            .step_time = cmd.step_time,
+    HANDLE_COMMAND(GET, MOT_ENA, Protocol::MotorHeader, {
+      MOTOR_COMMAND(MOT_ENA, {
+        REPLY(ACK, MOT_ENA,
+              Protocol::MotorEnable{
+                  .id = cmd->id,
+                  .enable = motor->enabled,
+              });
+      });
+    });
+    HANDLE_COMMAND(SET, MOT_ENA, Protocol::MotorEnable, {
+      MOTOR_COMMAND(MOT_ENA, {
+        if (cmd->enable != motor->enabled) {
+          if (!motor->online()) {
+            PRINT(REJ, MOT_ENA, MOTOR_OFFLINE);
+            break;
+          }
+          if (cmd->enable)
+            motor->enable();
+          else
+            motor->disable();
         };
-        tx.send(Method::ACK, Property::MOT_MOV, res);
-        continue;
-      }
-      if (!motor.enabled()) {
-        tx.send(Method::REJ, MOT_MOV, cmd);
-        WARN("MOT_MOV Rejected: %s", "Motor not enabled");
-        continue;
-      }
-      motor.state.mode = Motor::State::MODE_NORM;
-      motor.state.step_time = cmd.step_time;
-      motor.state.norm.target = cmd.target;
-      if (!motor.task_once.pending)
-        motor.schedule(micros());
-    }
+        REPLY(ACK, MOT_ENA,
+              Protocol::MotorEnable{
+                  .id = cmd->id,
+                  .enable = motor->enabled,
+              });
+      });
+    });
+    HANDLE_COMMAND(GET, MOT_CFG, Protocol::MotorHeader, {
+      MOTOR_COMMAND(MOT_CFG, {
+        REPLY(ACK, MOT_CFG,
+              Protocol::MotorConfig{
+                  .id = motor->addr,
+                  .config = motor->config,
+              });
+      });
+    });
+    HANDLE_COMMAND(SET, MOT_CFG, Protocol::MotorConfig, {
+      MOTOR_COMMAND(MOT_CFG, {
+        if (motor->online()) {
+          motor->updateConfig(&cmd->config);
+          REPLY(ACK, MOT_CFG,
+                Protocol::MotorConfig{
+                    .id = motor->addr,
+                    .config = motor->config,
+                });
+        } else {
+          PRINT(REJ, MOT_CFG, MOTOR_OFFLINE);
+        }
+      });
+    });
+    HANDLE_COMMAND(SET, MOT_MOV, Protocol::MotorMove, {
+      MOTOR_COMMAND(MOT_MOV, {
+        if (!motor->enabled) {
+          PRINT(REJ, MOT_MOV, MOTOR_DISABLED);
+          break;
+        }
+        if (!motor->pending.writable()) {
+          PRINT(REJ, MOT_MOV, MOTOR_QUEUE_FULL);
+          break;
+        }
+        // DEBUG("Motor%d %d steps @ %dus\n", motor->addr, cmd->steps,
+        // cmd->interval);
+        motor->pending.push(Motor::Command{seq, cmd->steps, cmd->interval});
+        // Delay ACK until the pending move is applied by ISR handler.
+      });
+    });
+  default: {
+    static char buffer[254];
+    auto len = snprintf(buffer, sizeof(buffer), "Unsupported command: %s::%s",
+                        convert<const char *const>(frame.header.method()),
+                        convert<const char *const>(frame.header.property()));
+    if (len > 0)
+      tx.send(seq, Method::REJ, Property::NA, buffer, len);
     break;
   }
-    UNSUPPORTED(GET, MOT_HOME);
-  case HEADER(SET, MOT_HOME): {
-    const auto &cmd = frame.as<Protocol::MotorHome>();
+  }
+}
+
+inline void checkSerial() {
+  static bool connected = false;
+  if (!Serial) {
+    if (connected) {
+      connected = false;
+      DEBUG("Host disconnected\n");
+    }
+  } else {
+    if (!connected) {
+      connected = true;
+      DEBUG("Host connected\n");
+    }
+  }
+}
+
+extern uint32_t isr_active_cycles, isr_yield_cycles, isr_cycle_count;
+
+void agent(void *) {
+  while (true) {
+    TRACE("agentTick()");
+    agentTick();
+    TRACE_EXIT();
+    delay(1);
+  }
+}
+
+#define MOTOR_ACK(M)                                                           \
+  TRACE(#M ".done.readable()");                                                \
+  while (M.done.readable()) {                                                  \
+    TRACE(#M ".done.peek()");                                                  \
+    const auto &seq = M.done.peek();                                           \
+    REPLY(ACK, MOT_MOV);                                                       \
+    TRACE(#M ".done.peek()");                                                  \
+    M.done.pop();                                                              \
+    TRACE(#M ".done.readable()");                                              \
+  }                                                                            \
+  TRACE(#M " [TX COMPLETE]");
+
+int serialAvailable() {
+  TRACE("serialAvailable() query");
+  int available = Serial.available();
+  TRACE("serialAvailable() done");
+  return available;
+}
+
+void agentTick() {
+  // Feed hardware watchdog to prevent reset
+  esp_task_wdt_reset();
+  static unsigned long last_report = millis();
+  static constexpr unsigned REPORT_INTERVAL = 10000;
+  if (millis() - last_report >= REPORT_INTERVAL) {
+    last_report = millis();
+    const auto volatile active = isr_active_cycles;
+    const auto volatile yield = isr_yield_cycles;
+    const auto volatile count = isr_cycle_count;
+    isr_cycle_count = 0;
+    DEBUG(""
+          "ISR %.2fKHz"
+          ", "
+          "Active %u cycles"
+          ", "
+          "Yield %u cycles (%.2f%%)"
+          "\n",
+          count / (float)REPORT_INTERVAL, active, yield,
+          100.0 * active / (active + yield));
     for (auto &motor : motors) {
-      if (motor.addr != cmd.id)
-        continue;
-      if (!motor.enabled()) {
-        tx.send(Method::REJ, MOT_HOME, cmd);
-        WARN("MOT_HOME Rejected: %s", "Motor not enabled");
-        continue;
+      if (motor.enabled) {
+        DEBUG("Motor %d [%d steps @ %u us] Pending=%u\n", motor.addr,
+              motor.steps, motor.interval, motor.pending.len());
       }
-      motor.state.mode = Motor::State::MODE_HOME;
-      motor.state.home.init(cmd);
-      if (!motor.task_once.pending)
-        motor.schedule(micros());
     }
-    break;
   }
-    UNSUPPORTED(SET, MOT_STAT);
-  case HEADER(GET, MOT_STAT): {
-    const auto &cmd = frame.as<Protocol::MotorHeader>();
-    for (auto &motor : motors) {
-      if (motor.addr != cmd.id)
-        continue;
-      const Protocol::MotorStatus res = {
-          .id = cmd.id,
-          .diag_pin = motor.diag.read(),
-          .sg_result = motor.driver.SG_RESULT(),
-          .position = motor.state.position,
-      };
-      tx.send(Method::ACK, Property::MOT_STAT, res);
+  TRACE("checkSerial()");
+  checkSerial();
+  if (!Serial) {
+    if (Board::Drv::is_enabled()) {
+      Board::Drv::disable();
+      for (auto &motor : motors)
+        motor.disable();
     }
-    break;
+    return;
   }
-  default:
-    WARN("Frame ignored (header = 0x%02X)", code);
-    break;
+  TRACE("Motor ACK TX");
+  MOTOR_ACK(motors[0]);
+  MOTOR_ACK(motors[1]);
+  MOTOR_ACK(motors[2]);
+  while (serialAvailable() > 0) {
+    TRACE("Process RX");
+    if (!rx.valid) {
+      TRACE("rx.recv()");
+      rx.recv();
+    }
+    TRACE("Check RX valid");
+    if (!rx.valid)
+      continue;
+    TRACE("processFrame()");
+    processFrame(rx.frame);
+    TRACE("Reset RX valid");
+    rx.valid = false;
   }
 }

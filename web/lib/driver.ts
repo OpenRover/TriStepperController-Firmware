@@ -7,9 +7,12 @@
 import { Method, Prop, Packet } from "./protocol";
 import AsyncChain from "async-chain-list";
 import { bool } from "./stdint";
+import { hex, hexView } from "./util";
 import serial from "./serial";
 import createEvent from "./event";
-import abortable from "./abortable";
+import defer, { type Defer } from "./defer";
+import SequencePool from "./sequence-pool";
+import COBS from "./cobs";
 
 class SyncMessage extends Map<string, string> {
   readonly type: string;
@@ -26,7 +29,30 @@ class SyncMessage extends Map<string, string> {
   }
 }
 
-const driver = new (class Driver {
+class TimeoutError extends Error {
+  name = "RequestTimeout";
+  private end = Date.now();
+  constructor(
+    message: string = "Operation timed out",
+    public readonly start: number = Date.now(),
+  ) {
+    super(message);
+  }
+  refresh() {
+    this.end = Date.now();
+    return this;
+  }
+  toString() {
+    return `${this.name}: ${this.message} (after ${Math.round(this.end - this.start)} ms)`;
+  }
+}
+
+class RejectedError extends Error {
+  name = "RequestRejected";
+}
+
+class Driver extends SequencePool<Defer<Packet>, number> {
+  // Incoming stream for broadcast packets (seq=0)
   private rx = new AsyncChain<Packet>();
   [Symbol.asyncIterator]() {
     return this.rx[Symbol.asyncIterator]();
@@ -39,31 +65,52 @@ const driver = new (class Driver {
   public readonly onDisable = createEvent();
 
   constructor() {
-    serial.onConnect(() => this.enable());
-    serial.onBeforeDisconnect(() => this.disable());
+    super(new Set(Array.from({ length: 255 }, (_, i) => i + 1)));
+    serial.onConnect(() => this.enable(1000));
+    serial.onBeforeDisconnect(() => this.disable(1000));
     (async () => {
-      let buffer = new Uint8Array(0);
       // Read until next zero byte (which indicates end of packet)
-      for await (const chunk of serial) {
-        // Append chunk to buffer
-        const newBuffer = new Uint8Array(buffer.length + chunk.length);
-        newBuffer.set(buffer);
-        newBuffer.set(chunk, buffer.length);
-        buffer = newBuffer;
-        // check for packet termination
-        while (true) {
-          const zero_idx = buffer.indexOf(0);
-          if (zero_idx === -1) break;
-          const packet_raw = buffer.slice(0, zero_idx + 1);
-          buffer = buffer.slice(zero_idx + 1);
-          try {
-            const packet = Packet.decode(packet_raw);
-            if (packet.validate())
-              this.rx = this.rx.push(packet.print("⬆", "color: lime"));
-            else console.warn("Invalid packet checksum:", packet);
-          } catch (e) {
-            console.warn(e);
+      for await (const chunk of COBS.chunks(serial)) {
+        try {
+          const decoded = COBS.decode(chunk);
+          if (decoded.length < 3)
+            throw new Error("Packet too short after COBS decoding");
+          // Verify CRC
+          const checksum = decoded.reduce((c, b) => c ^ b, 0);
+          if (checksum !== 0)
+            throw new Error(
+              `Invalid packet CRC: expected 0, got ${hex(checksum)}`,
+            );
+          const sequence = (decoded[2]! << 8) | decoded[1]!;
+          const payload = decoded.slice(3);
+          if (sequence === 0) {
+            const packet = new Packet(payload);
+            packet.print(`⬆ ${sequence.toString().padStart(6, " ")}`);
+            this.rx = this.rx.push(packet);
+          } else {
+            const deferred = this.resolveSequence(sequence);
+            try {
+              const packet = new Packet(payload);
+              packet.print(`⬆ ${sequence.toString().padStart(6, " ")}`);
+              switch (packet.method) {
+                case Method.ACK:
+                  deferred.resolve(packet);
+                  break;
+                case Method.REJ:
+                  deferred.reject(new RejectedError(packet.text));
+                  break;
+                default:
+                  console.warn(
+                    `Unexpected method for #${sequence}: ${Method[packet.method]}`,
+                  );
+                  deferred.resolve(packet);
+              }
+            } catch (e) {
+              deferred.reject(e);
+            }
           }
+        } catch (e) {
+          console.warn(e, hexView(chunk));
         }
       }
     })();
@@ -82,25 +129,38 @@ const driver = new (class Driver {
     })();
   }
 
-  send(packet: Packet) {
-    return serial.send(packet.print("⬇", "color: cyan").COBS);
-  }
-
-  wait(
-    method: Method,
-    prop: Prop,
-    validate: (payload: Uint8Array) => boolean | number | undefined,
-  ) {
-    return abortable(async (abortable) => {
-      for await (const packet of abortable.iter(this.rx)) {
-        if (
-          packet.method === method &&
-          packet.prop === prop &&
-          validate(packet.payload)
-        )
-          return packet;
-      }
-    });
+  request(packet: Packet, timeout?: number) {
+    const deferred = defer<Packet>();
+    const { promise, reject } = deferred;
+    const sequence = this.assignSequence(deferred);
+    packet.print(`⬇ ${sequence.toString().padStart(6, " ")}`);
+    // Set up timeout if specified
+    if (timeout !== undefined) {
+      const error = new TimeoutError([sequence, packet].join(" "));
+      const handler = setTimeout(() => reject(error.refresh()), timeout);
+      promise.finally(() => clearTimeout(handler));
+    }
+    // Catch-all to release sequence on promise settlement
+    promise.finally(() => this.releaseSequence(sequence, deferred));
+    // Split u16 sequence into two u8 bytes
+    const seq_l = sequence & 0xff;
+    const seq_h = (sequence >> 8) & 0xff;
+    // Compute CRC byte
+    const crc = packet.reduce((c, b) => c ^ b, seq_l ^ seq_h);
+    // Prefix with crc and sequence byte
+    const payload = new Uint8Array(packet.length + 3);
+    payload[0] = crc;
+    payload[1] = seq_l; // Lower 8 bits
+    payload[2] = seq_h; // Higher 8 bits
+    payload.set(packet, 3);
+    // Send via serial
+    try {
+      serial.write(COBS.encode(payload));
+    } catch (e) {
+      reject(e);
+    }
+    // Return deferred promise
+    return promise;
   }
 
   #enabled = false;
@@ -108,34 +168,32 @@ const driver = new (class Driver {
     return this.#enabled;
   }
 
-  async enable() {
-    await Promise.allSettled(this.onBeforeEnable.dispatch());
-    await this.send(Packet.encode(Method.SET, Prop.SYS_ENA, bool(true)));
-    await this.wait(
-      Method.ACK,
-      Prop.SYS_ENA,
-      ([enabled]) => enabled === 0x01,
-    ).timeout(1000);
+  async enable(timeout?: number) {
+    await Promise.all(this.onBeforeEnable.dispatch());
+    await this.request(
+      Packet.encode(Method.SET, Prop.SYS_ENA, bool(true)),
+      timeout,
+    );
     this.#enabled = true;
-    await Promise.allSettled(this.onEnable.dispatch());
+    return Promise.all(this.onEnable.dispatch());
   }
 
-  async disable() {
+  async disable(timeout?: number) {
     await Promise.allSettled(this.onBeforeDisable.dispatch());
-    await this.send(Packet.encode(Method.SET, Prop.SYS_ENA, bool(false)));
-    await this.wait(
-      Method.ACK,
-      Prop.SYS_ENA,
-      ([enabled]) => enabled === 0x00,
-    ).timeout(1000);
+    await this.request(
+      Packet.encode(Method.SET, Prop.SYS_ENA, bool(false)),
+      timeout,
+    );
     this.#enabled = false;
-    await Promise.allSettled(this.onDisable.dispatch());
+    await Promise.all(this.onDisable.dispatch());
   }
-})();
+}
 
-export default driver;
+const driver = new Driver();
 
 driver.onBeforeEnable(() => console.log("driver.onBeforeEnable"));
 driver.onEnable(() => console.log("driver.onEnable"));
 driver.onBeforeDisable(() => console.log("driver.onBeforeDisable"));
 driver.onDisable(() => console.log("driver.onDisable"));
+
+export default driver;

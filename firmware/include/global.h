@@ -5,13 +5,13 @@
 #pragma once
 
 #include <protocol.h>
-#include <scheduler.h>
 
 namespace Global {
 
+extern unsigned rx_count, tx_count;
+
 extern Protocol::RX rx;
 extern Protocol::TX tx;
-extern Scheduler::Scheduler<64> scheduler;
 
 namespace Config {
 

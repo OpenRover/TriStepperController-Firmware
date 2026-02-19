@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdio>
 
+#include "debug.h"
 #include "global.h"
 
 auto constexpr LOG_BUF_SIZE = sizeof(Global::tx.frame.payload);
@@ -25,32 +26,10 @@ auto constexpr LOG_BUF_SIZE = sizeof(Global::tx.frame.payload);
 inline void __printf__(int ret) {
   if (ret > 0) {
     ret = ret >= static_cast<int>(LOG_BUF_SIZE) ? LOG_BUF_SIZE - 1 : ret;
-    Global::tx.frame.header.set(Protocol::Method::LOG);
+    Global::tx.frame.header.set(0, Protocol::Method::LOG);
     Global::tx.frame.payload_size = ret;
     Global::tx.encode_frame();
     Global::tx.send_frame();
-  }
-}
-
-#define PANIC(...)                                                             \
-  __panic__(                                                                   \
-      snprintf((char *)&Global::tx.frame.payload, LOG_BUF_SIZE, __VA_ARGS__))
-
-void __panic_enter__();
-void __panic_signal__();
-
-inline void __panic__(int ret) {
-  __panic_enter__();
-  if (ret > 0) {
-    ret = ret >= static_cast<int>(LOG_BUF_SIZE) ? LOG_BUF_SIZE - 1 : ret;
-    Global::tx.frame.header.set(Protocol::Method::LOG);
-    Global::tx.frame.payload_size = ret;
-    Global::tx.encode_frame();
-  }
-  while (true) {
-    if (ret > 0)
-      Global::tx.send_frame();
-    __panic_signal__();
   }
 }
 

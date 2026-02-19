@@ -2,7 +2,12 @@
 // License: MIT
 // Author: Yuxuan Zhang (zhangyuxuan@ufl.edu)
 // =============================================================================
-#define PROJECT "TriStepper-Driver"
-#define VERSION "1.0.0-alpha.0"
 
-#define IDENTITY PROJECT "@" VERSION
+#include "debug.h"
+
+#include <Arduino.h>
+
+void __trigger_panic__() {
+    // Trigger panic reset
+    ESP.restart();
+}

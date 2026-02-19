@@ -32,7 +32,44 @@ public:
       digitalWrite(pin, !digitalRead(pin));
     }
   }
+  inline void analogWrite(int value) const {
+    if (invert)
+      value = 255 - value;
+    if (mode == OUTPUT || mode == OUTPUT_OPEN_DRAIN) {
+      ::analogWrite(pin, value);
+    }
+  }
 };
+
+namespace Port {
+extern struct SPI {
+  Pin MISO, MOSI, CS, SCLK;
+  inline void init() {
+    MISO.init();
+    MOSI.init();
+    CS.init();
+    SCLK.init();
+  }
+} SPI;
+extern struct I2C_ColorSensor {
+  Pin LED, INT, SDA, SCL;
+  inline void init() {
+    LED.init();
+    INT.init();
+    SDA.init();
+    SCL.init();
+  }
+} I2C_ColorSensor;
+extern struct WS2812 {
+  Pin DATA;
+  inline void init() { DATA.init(); }
+} WS2812;
+inline void init() {
+  SPI.init();
+  I2C_ColorSensor.init();
+  WS2812.init();
+}
+} // namespace Port
 
 namespace LED {
 extern Pin BUILTIN, RED, GREEN, BLUE; // Onboard RGB LED
@@ -56,11 +93,7 @@ public:
   inline void trigger() {};
 
   Switch(Pin &&pin, void (*trigger_helper)())
-      : Pin(pin), trigger_helper(trigger_helper) {
-    if (!trigger_helper) {
-      throw std::runtime_error("Switch trigger helper callback cannot be NULL");
-    }
-  };
+      : Pin(pin), trigger_helper(trigger_helper) {};
 
   void init() const {
     Pin::init();
@@ -79,6 +112,10 @@ public:
   static constexpr long BAUD_RATE = 115200;
   static constexpr HardwareSerial &serial = Serial1;
   static constexpr uint32_t baud = 115200;
+  static inline void init() {
+    pinMode(EN, OUTPUT);
+    serial.begin(baud, SERIAL_8N1, RX, TX);
+  }
   static inline bool is_enabled() { return digitalRead(EN) == LOW; }
   static inline void enable() { digitalWrite(EN, LOW); }
   static inline void disable() { digitalWrite(EN, HIGH); }

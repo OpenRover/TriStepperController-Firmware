@@ -2,7 +2,5 @@
 // License: MIT
 // Author: Yuxuan Zhang (zhangyuxuan@ufl.edu)
 // =============================================================================
-#define PROJECT "TriStepper-Driver"
-#define VERSION "1.0.0-alpha.0"
 
-#define IDENTITY PROJECT "@" VERSION
+template <typename DST, typename SRC> DST convert(const SRC &src);

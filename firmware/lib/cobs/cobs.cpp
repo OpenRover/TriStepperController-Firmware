@@ -13,6 +13,7 @@ int16_t RX::decode(bool (*available)(), char (*read)()) {
   while (available()) {
     // Handle next byte
     const auto byte = read();
+    raw[raw_index++] = byte;
     // Check for reserved zero byte
     if (byte == 0) {
       if (counter == 0)
@@ -76,5 +77,23 @@ int16_t TX::encode(const uint8_t *input, const uint8_t len) {
   // Return length including tailing zero byte
   return index + 1;
 };
+
+const char *errorno(int16_t code) {
+  switch (code) {
+  case UNFINISHED:
+    return "[[PENDING]]";
+  case ERR_OVERFLOW:
+    return "Buffer overflow";
+  case ERR_UNEXPECTED_ZERO:
+    return "Unexpected zero byte";
+  case ERR_UNEXPECTED_END:
+    return "Unexpected end of data";
+  default:
+    if (code < 0)
+      return "Unknown error";
+    else
+      return "OK";
+  }
+}
 
 } // namespace COBS

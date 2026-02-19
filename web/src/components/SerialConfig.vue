@@ -7,7 +7,7 @@
 <script lang="ts">
 import { computed, ref, watch, shallowRef } from 'vue'
 import serial, { getPortIdString } from 'lib/serial'
-import Window from './Window.vue'
+import Window from '../layout/Window.vue'
 import Toggle from './Toggle.vue'
 
 type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'disconnecting'
@@ -55,6 +55,7 @@ watch(autoConnect, (value) => {
     serial.connect(port.value, baud.value).catch(error => {
       console.error('Auto-connect failed:', error)
       errorMessage.value = `Auto-connect failed: ${error}`
+      connInfo.value = 'disconnected';
     })
   }
 })

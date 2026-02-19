@@ -3,13 +3,12 @@
  * This source code is licensed under the MIT license.
  * You may find the full license in project root directory.
  --------------------------------------------------------- -->
-
 <script setup lang="ts">
-import Layout from './components/Layout.vue'
+import Layout from './layout/Layout.vue'
 import { FontAwesomeIcon as Icon } from '@fortawesome/vue-fontawesome'
 import { faGears, faNetworkWired } from '@fortawesome/free-solid-svg-icons';
 import SerialConfig, { connInfo } from './components/SerialConfig.vue';
-import Overlay from './components/Overlay.vue';
+import Overlay from './layout/Overlay.vue';
 import { computed } from 'vue';
 import MotorConfigPanel from './components/MotorConfigPanel.vue';
 import Control2D from './components/Control2D.vue';
